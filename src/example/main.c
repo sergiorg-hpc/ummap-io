@@ -1,19 +1,10 @@
-#include <stdio.h>
-#include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/mman.h>
-#include <sys/sysinfo.h>
 #include <sys/stat.h>
-#include <sys/syscall.h>
-#include <string.h>
-#include <errno.h>
-#include <limits.h>
-#include <stdint.h>
-#include <signal.h>
-#include <pthread.h>
-#include <linux/futex.h>
-#include <semaphore.h>
 #include "ummap.h"
 
 #define TRUE  1
