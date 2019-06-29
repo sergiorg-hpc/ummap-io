@@ -6,9 +6,9 @@ Pending.
 ## How to use the library
 Pending.
 
-## Known Bugs
+## Source Code Example
 Pending.
 
-## Source Code Example
+## Known Bugs
 Pending.
 
