@@ -96,11 +96,6 @@ typedef struct ummap_alloc
 }_ ummap_alloc_t;
 
 /**
- * Function pointer to replace the default futex operations by the I/O thread.
- */
-typedef int (*futex_fn_t)(futex_t*);
-
-/**
  * Structure that defines the state of the main I/O thread, that manages the
  * flushing to storage of the dirty segments.
  */
@@ -110,8 +105,6 @@ typedef struct
     uint32_t   is_active;          // Flag to determine if the thread is allowed
     uint32_t   min_flush_interval; // Minimum wait interval between each flush
     sem_t      sem;                // Synchronization semaphore
-    futex_fn_t futex_lock;         // Pointer to the futex lock operation
-    futex_fn_t futex_unlock;       // Pointer to the futex unlock operation
 }_ iothread_t;
 
 /**
@@ -120,8 +113,7 @@ typedef struct
 typedef struct
 {
     mconfig_t mconfig;             // Memory allocation configuration
-    int16_t   bsync_enabled;       // Flag to enable bulk synchronization
-    int16_t   ftxopt_enabled;      // Flag to enable the futex optimization
+    int32_t   bsync_enabled;       // Flag to enable bulk synchronization
     size_t    memlimit;            // Main memory limit for all the allocations
     size_t    memlimit_rank;       // Main memory limit per rank (intra-node)
     uint32_t  r_index;             // Index of the rank (intra-node)

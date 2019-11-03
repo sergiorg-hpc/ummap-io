@@ -44,8 +44,6 @@ typedef struct sigaction saction_t;
     ((uintptr_t)_alloc_seg - (uintptr_t)ualloc->alloc_seg) >> 5 // 32 bytes
 #define SET_SHM_STRING(str, id, format, ...) \
     sprintf(str, "/%s_%d" format, id, getuid(),##__VA_ARGS__);
-#define FUTEX_FN_DISABLE(futex_fn) \
-    (g_status.ftxopt_enabled) ? futex_fn_empty : futex_fn;
 #define CHECK_ALLOC(ualloc, ualloc_tmp, success_fn) \
     const uintptr_t base_addr = (uintptr_t)ualloc_tmp->addr; \
     const uintptr_t next_addr = base_addr + ualloc_tmp->size; \
@@ -70,9 +68,6 @@ CREATE_LIST(ualloc,  ummap_alloc_t,  g_ualloc, static);
 // Methods are declared here to maintain the implementation order below
 static int configure_mem_shm();
 static int release_pf_handler();
-
-// Empty handler for the futex functionality when handling page-faults
-static int futex_fn_empty(futex_t *futex) { return ESUCCESS; }
 
 static int getUAllocFromAddr(uintptr_t addr, ummap_alloc_t **ualloc)
 {
@@ -389,10 +384,6 @@ static void* iothread_handler(void *arg) __CHK_FN__
         // Check if an unexpected error has been found
         CHKBEXIT((hr && errno != ETIMEDOUT), ENOLCK);
         
-        // Set the futex operations to avoid issues handling the segments
-        g_iothread.futex_lock   = futex_lock;
-        g_iothread.futex_unlock = futex_unlock;
-        
         // Acquire the lock for the allocation cache
         CHKEXIT(futex_lock(&g_ualloc_futex));
         
@@ -404,10 +395,6 @@ static void* iothread_handler(void *arg) __CHK_FN__
         
         // Release the lock for the allocation cache
         CHKEXIT(futex_unlock(&g_ualloc_futex));
-        
-        // Reset the futex operations to reduce the overhead while inactive
-        g_iothread.futex_lock   = FUTEX_FN_DISABLE(futex_lock);
-        g_iothread.futex_unlock = FUTEX_FN_DISABLE(futex_unlock);
     }
     
     return CHK_VALUE(NULL, CHK_EMPTY_ERROR_FN);
@@ -475,7 +462,7 @@ static void sigsegv_handler(int sig, siginfo_t *si, void *context) __CHK_FN__
     }
     
     // Acquire the lock for the segment
-    CHKEXIT(g_iothread.futex_lock(&alloc_seg->futex));
+    CHKEXIT(futex_lock(&alloc_seg->futex));
     
     // DBGPRINT("Marking segment corresponding to a %s fault",
     //                                        (is_pf_write) ? "WRITE" : "READ");
@@ -492,7 +479,7 @@ static void sigsegv_handler(int sig, siginfo_t *si, void *context) __CHK_FN__
     policy->notify(&policy->list, alloc_seg, pf_type);
     
     // Release the lock for the segment
-    CHKEXIT(g_iothread.futex_unlock(&alloc_seg->futex));
+    CHKEXIT(futex_unlock(&alloc_seg->futex));
     
     // DBGPRINT("SIGSEGV for address 0x%zu handled correctly!", addr_si);
     
@@ -534,10 +521,6 @@ static int configure_pf_handler() __CHK_FN__
         str[0] = '\0'; // Reset the string
         CHK(get_env("UMMAP_BULK_SYNC", "%s", (void *)str));
         g_status.bsync_enabled = (strcmp(str, "false") != 0);
-        
-        str[0] = '\0'; // Reset the string
-        CHK(get_env("UMMAP_FUTEX_OPT", "%s", (void *)str));
-        g_status.ftxopt_enabled = (strcmp(str, "false") != 0);
         
         // Retrieve the main memory limit for all the allocations
         CHK(get_env("UMMAP_MEM_LIMIT", "%zu", (void *)&g_status.memlimit));
@@ -587,8 +570,6 @@ static int configure_pf_handler() __CHK_FN__
     {
         g_iothread.is_active          = TRUE;
         g_iothread.min_flush_interval = UINT_MAX;
-        g_iothread.futex_lock         = FUTEX_FN_DISABLE(futex_lock);
-        g_iothread.futex_unlock       = FUTEX_FN_DISABLE(futex_unlock);
         CHK(sem_init(&g_iothread.sem, 0, 0));
         CHK(pthread_create(&g_iothread.tid, NULL, iothread_handler, NULL));
     }
