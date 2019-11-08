@@ -120,7 +120,8 @@ int get_env(const char *name, const char *format, void *target) __CHK_FN__
     return CHK_SUCCESS(CHK_EMPTY_ERROR_FN);
 }
 
-int open_shm(const char *name, size_t size, int8_t incr, void **addr) __CHK_FN__
+int open_shm(const char *name, size_t size, int8_t incr, void **addr,
+             size_t *count) __CHK_FN__
 {
     int32_t fd = -1;
     stat_t  st = { 0 };
@@ -137,6 +138,11 @@ int open_shm(const char *name, size_t size, int8_t incr, void **addr) __CHK_FN__
     *addr = mmap(NULL, st.st_size, (PROT_READ | PROT_WRITE), MAP_SHARED, fd, 0);
     CHKB((*addr == MAP_FAILED), ENOMEM);
     CHK(close(fd));
+    
+    if (size > 0 && count != NULL)
+    {
+        *count = st.st_size / size;
+    }
     
     return CHK_SUCCESS(CHK_EMPTY_ERROR_FN);
 }

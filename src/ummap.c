@@ -12,6 +12,7 @@
 ///////////////////////////////////
 
 typedef struct sigaction saction_t;
+typedef struct stat      stat_t;
 
 #define MEM_FACTOR  0.9
 #define PROT_FULL   (PROT_READ    | PROT_WRITE)
@@ -19,12 +20,12 @@ typedef struct sigaction saction_t;
 #define MRMAP_FLAGS (MREMAP_FIXED | MREMAP_MAYMOVE)
 #define FILE_FLAGS  (O_NOATIME    | O_DSYNC) // O_DIRECT
 #define SIGEVICT    SIGRTMAX // Using SIGRTMAX to avoid conflicts
+#define START_DIFF  1000.0   // Difference limit between processes (1s)
 #define SHM_SEM_ID  "ummap_sem"
 #define SHM_PID_ID  "ummap_pid"
 #define SHM_RNK_ID  "ummap_rnk"
 #define SHM_MEM_ID  "ummap_mem"
 #define NUM_RANKS   (*g_status.num_ranks)
-#define NUM_RANKS_C g_status.num_ranks_curr
 #define MEM_SIZE    (*g_status.memsize)
 
 #define IS_SEG_VALID(alloc_seg)    ((alloc_seg)->header & __UINT64_C(1))
@@ -66,7 +67,6 @@ CREATE_CACHE(UAlloc, ummap_alloc_t*, g_ualloc, static);
 CREATE_LIST(ualloc,  ummap_alloc_t,  g_ualloc, static);
 
 // Methods are declared here to maintain the implementation order below
-static int configure_mem_shm();
 static int release_pf_handler();
 
 static int getUAllocFromAddr(uintptr_t addr, ummap_alloc_t **ualloc)
@@ -100,6 +100,24 @@ static int getUAllocFromAddr(uintptr_t addr, ummap_alloc_t **ualloc)
     return EINVAL;
 }
 
+static int readSeg(ummap_alloc_t *ualloc, off_t index_s, size_t size) __CHK_FN__
+{
+    const off_t offset_seg  = index_s << ualloc->seg_shift;
+    const off_t offset_file = ualloc->offset + offset_seg;
+    void        *addr_seg   = (void *)&ualloc->addr[offset_seg];
+    
+    DBGPRINT("Reading segment (offset=%zu size=%zu)", offset_file, size);
+    
+    // Set read / write permissions and read the segment from storage
+    CHK(mprotect(addr_seg, size, PROT_FULL));
+    CHKB((pread(ualloc->fd, addr_seg, size, offset_file) != size), EIO);
+    
+    // Increase the number of I/O reads
+    g_status.num_reads++;
+    
+    return CHK_SUCCESS(CHK_EMPTY_ERROR_FN);
+}
+
 static int writeSeg(ummap_alloc_t *ualloc, off_t index_s,
                     size_t size) __CHK_FN__
 {
@@ -107,10 +125,10 @@ static int writeSeg(ummap_alloc_t *ualloc, off_t index_s,
     const off_t offset_file = ualloc->offset + offset_seg;
     void        *addr_seg   = (void *)&ualloc->addr[offset_seg];
     
-    // Set read-only permission to avoid further changes
-    CHK(mprotect(addr_seg, size, PROT_READ));
+    DBGPRINT("Writing segment (offset=%zu size=%zu)", offset_file, size);
     
-    // Flush to storage with data integrity only
+    // Set read-only permission and flush to storage with data integrity only
+    CHK(mprotect(addr_seg, size, PROT_READ));
     CHKB((pwrite(ualloc->fd, addr_seg, size, offset_file) != size), EIO);
     
     // Increase the number of I/O writes
@@ -296,32 +314,62 @@ static int evictSeg(ssize_t req_size) __CHK_FN__
     return CHK_SUCCESS(CHK_EMPTY_ERROR_FN);
 }
 
-static int notifyMemlimit(ssize_t req_size) __CHK_FN__
+static int notifyMemlimit(size_t memlimit_rank) __CHK_FN__
 {
-    sigval_t sigval = { .sival_ptr = NULL };
+    const size_t num_ranks = NUM_RANKS; // Cache the value to avoid issues
+    sigval_t     sigval    = { .sival_ptr = NULL };
     
     // Check if only one process is available (i.e., an error ocurred)
-    CHKB((NUM_RANKS == 1), EPERM);
+    CHKB((num_ranks == 1), EPERM);
     
     // Ensure that the structure that contains the memory consumption is set
-    if (g_status.memsizes == NULL || NUM_RANKS_C != NUM_RANKS)
+    if (g_status.memsizes_count != num_ranks)
     {
-        CHK(configure_mem_shm());
+        const int32_t  r_pid         = getpid();
+        const uint32_t r_init        = g_status.memsizes_count;
+        char           str[NAME_MAX] = { 0 };
+        
+        g_status.memsizes       = (size_t **)realloc(g_status.memsizes,
+                                                  sizeof(size_t *) * num_ranks);
+        g_status.memsizes_count = num_ranks;
+        
+        // Remap the shared memory structure that contains the PIDs, if needed
+        if (g_status.ranks_count < num_ranks)
+        {
+            MUNMAP(g_status.ranks, g_status.ranks_count * sizeof(int32_t));
+            SET_SHM_STRING(str, SHM_PID_ID, "");
+            CHK(open_shm(str, sizeof(int32_t), FALSE, (void **)&g_status.ranks,
+                         &g_status.ranks_count));
+        }
+        
+        // Map the memory consumption of the other processes (intra-node)
+        for (uint32_t r_index = r_init; r_index < num_ranks; r_index++)
+        {
+            // Avoid to map twice the memory consumption of the process
+            if (g_status.ranks[r_index] != r_pid)
+            {
+                SET_SHM_STRING(str, SHM_MEM_ID, "_%d", g_status.ranks[r_index]);
+                CHK(open_shm(str, sizeof(size_t), FALSE,
+                             (void **)&g_status.memsizes[r_index], NULL));
+            }
+        }
+        
+        g_status.memsizes[g_status.r_index] = g_status.memsize;
     }
     
     // Look for the PIDs with the highest memory consumption
-    for (uint32_t m_index = (g_status.r_index + 1) % NUM_RANKS_C;
-         m_index != g_status.r_index; m_index = (m_index + 1) % NUM_RANKS_C)
+    for (uint32_t r_index = (g_status.r_index + 1) % num_ranks;
+         r_index != g_status.r_index; r_index = (r_index + 1) % num_ranks)
     {
-        const size_t mem_size = *g_status.memsizes[m_index];
+        const size_t mem_size = *g_status.memsizes[r_index];
         
-        if (mem_size > g_status.memlimit_rank)
+        if (mem_size > memlimit_rank)
         {
-            const int32_t pid = g_status.ranks[m_index];
+            const int32_t r_pid = g_status.ranks[r_index];
             
-            DBGPRINT("Notifying process %d (ru=%zu)", pid, mem_size);
+            DBGPRINT("Notifying process %d (ru=%zu)", r_pid, mem_size);
             
-            CHK(sigqueue(pid, SIGEVICT, sigval));
+            CHK(sigqueue(r_pid, SIGEVICT, sigval));
         }
     }
     
@@ -330,8 +378,9 @@ static int notifyMemlimit(ssize_t req_size) __CHK_FN__
 
 static int ensureSegFit(size_t seg_size) __CHK_FN__
 {
-    uint8_t evict_seg  = ((MEM_SIZE + seg_size) > g_status.memlimit_rank);
-    uint8_t notify_mem = FALSE;
+    const size_t memlimit_rank = g_status.memlimit / (size_t)NUM_RANKS;
+    uint8_t      evict_seg     = ((MEM_SIZE + seg_size) > memlimit_rank);
+    uint8_t      notify_mem    = FALSE;
     
     // Dynamic memory allocations require considering the current used memory
     if (g_status.mconfig == UMMAP_MEMCONFIG_DYNAMIC)
@@ -347,7 +396,7 @@ static int ensureSegFit(size_t seg_size) __CHK_FN__
     if (evict_seg)
     {
         DBGPRINT("Evicting a local segment (ru=%zu / rlimit=%zu)\n",
-                                              MEM_SIZE, g_status.memlimit_rank);
+                                                       MEM_SIZE, memlimit_rank);
         
         CHK(evictSeg(seg_size));
     }
@@ -355,9 +404,9 @@ static int ensureSegFit(size_t seg_size) __CHK_FN__
     else if (notify_mem)
     {
         DBGPRINT("Notifying another process (ru=%zu / rlimit=%zu)",
-                                              MEM_SIZE, g_status.memlimit_rank);
+                                                       MEM_SIZE, memlimit_rank);
         
-        CHK(notifyMemlimit(g_status.memlimit_rank - MEM_SIZE));
+        CHK(notifyMemlimit(memlimit_rank));
     }
     
     return CHK_SUCCESS(CHK_EMPTY_ERROR_FN);
@@ -412,7 +461,7 @@ static void sigsegv_handler(int sig, siginfo_t *si, void *context) __CHK_FN__
     void            *addr_seg   = NULL;
     ummap_policy_t  *policy     = NULL;
     
-    // DBGPRINT("SIGSEGV captured for address 0x%zu", addr_si);
+    DBGPRINT("SIGSEGV captured for address 0x%zu", addr_si);
     
     // Retrieve the allocation and exit if the address is unknown (i.e., the
     // SIGSEGV corresponds to another address or unrelated error) or if the
@@ -427,34 +476,17 @@ static void sigsegv_handler(int sig, siginfo_t *si, void *context) __CHK_FN__
     addr_seg   = (void *)&ualloc->addr[offset_seg];
     policy     = ualloc->policy;
     
-    // DBGPRINT("Segment 0x%zu found (index_s=%zu)", offset_seg, index_s);
+    DBGPRINT("Segment 0x%zu found (index_s=%zu)", offset_seg, index_s);
     
     if (!IS_SEG_VALID(alloc_seg))
     {
-        // Calculate the main memory limit allowed per rank
-        if (g_status.memlimit_rank == 0)
-        {
-            // <<<<<< Important: Can cause problems if not all ranks are active!
-            g_status.memlimit_rank = g_status.memlimit / (size_t)NUM_RANKS;
-        }
-        
         // Ensure that we can fit another segment
         CHKEXIT(ensureSegFit(ualloc->seg_size));
         
         // Check if the segment must be read from storage
         if (IS_SEG_READFILE(alloc_seg))
         {
-            const off_t offset_file = ualloc->offset + offset_seg;
-            
-            DBGPRINT("Reading segment from storage (offset=%zu)", offset_file);
-            
-            // Temporarily set permissions and read the segment from storage
-            CHKEXIT(mprotect(addr_seg, ualloc->seg_size, PROT_FULL));
-            CHKBEXIT((pread(ualloc->fd, addr_seg, ualloc->seg_size,
-                            offset_file) != ualloc->seg_size), EIO);
-            
-            // Increase the number of I/O reads
-            g_status.num_reads++;
+            CHKEXIT(readSeg(ualloc, index_s, ualloc->seg_size));
         }
     
         // Increase the estimated memory consumption
@@ -464,8 +496,8 @@ static void sigsegv_handler(int sig, siginfo_t *si, void *context) __CHK_FN__
     // Acquire the lock for the segment
     CHKEXIT(futex_lock(&alloc_seg->futex));
     
-    // DBGPRINT("Marking segment corresponding to a %s fault",
-    //                                        (is_pf_write) ? "WRITE" : "READ");
+    DBGPRINT("Marking segment corresponding to a %s fault",
+                                              (is_pf_write) ? "WRITE" : "READ");
     
     // Update the protection of the segment accordingly
     CHKEXIT(mprotect(addr_seg, ualloc->seg_size,
@@ -481,14 +513,15 @@ static void sigsegv_handler(int sig, siginfo_t *si, void *context) __CHK_FN__
     // Release the lock for the segment
     CHKEXIT(futex_unlock(&alloc_seg->futex));
     
-    // DBGPRINT("SIGSEGV for address 0x%zu handled correctly!", addr_si);
+    DBGPRINT("SIGSEGV for address 0x%zu handled correctly!", addr_si);
     
     return CHK_VOID(CHK_EMPTY_ERROR_FN);
 }
 
 static void sigevict_handler(int sig, siginfo_t *si, void *context) __CHK_FN__
 {
-    const ssize_t diff = (MEM_SIZE - g_status.memlimit_rank);
+    const size_t  memlimit_rank = g_status.memlimit / (size_t)NUM_RANKS;
+    const ssize_t diff          = (MEM_SIZE - memlimit_rank);
     
     DBGPRINT("SIGEVICT captured (diff=%zu memsize=%zu)", diff, MEM_SIZE);
     
@@ -507,11 +540,7 @@ static void sigevict_handler(int sig, siginfo_t *si, void *context) __CHK_FN__
 static int configure_pf_handler() __CHK_FN__
 {
     saction_t sa            = { .sa_flags = SA_SIGINFO }; // SA_RESTART
-    double    factor        = MEM_FACTOR;
     char      str[NAME_MAX] = { 0 };
-    
-    // Ensure that we do not initialize twice the library (i.e., not supported)
-    CHKB((g_status.r_index != UINT_MAX), ENOTSUP);
     
     // Retrieve the global settings from the ENV variables
     {
@@ -520,7 +549,7 @@ static int configure_pf_handler() __CHK_FN__
         
         str[0] = '\0'; // Reset the string
         CHK(get_env("UMMAP_BULK_SYNC", "%s", (void *)str));
-        g_status.bsync_enabled = (strcmp(str, "false") != 0);
+        g_status.bsync_enabled = !strcmp(str, "true");
         
         // Retrieve the main memory limit for all the allocations
         CHK(get_env("UMMAP_MEM_LIMIT", "%zu", (void *)&g_status.memlimit));
@@ -528,6 +557,8 @@ static int configure_pf_handler() __CHK_FN__
         // If no limit was provided, calculate it with the "factor"
         if (g_status.memlimit == 0)
         {
+            double factor = MEM_FACTOR;
+            
             CHK(get_env("UMMAP_MEM_FACTOR", "%lf", (void *)&factor));
             CHK(get_totalram(&g_status.memlimit));
             
@@ -537,6 +568,17 @@ static int configure_pf_handler() __CHK_FN__
     
     // Define the shared memory structures for out-of-core support
     {
+        uint32_t   num_ranks  = 1;
+        stat_t     statbuf    = { 0 };
+        timespec_t *ts        = &statbuf.st_mtim;
+        double     start_time = 0.0;
+        
+        // Retrieve the start time for the current process (in milliseconds)
+        sprintf(str, "/proc/%d", getpid());
+        CHKB((stat(str, &statbuf) < 0 && errno != ENOENT), errno);
+        
+        start_time = (ts->tv_sec * 1000.0) + (ts->tv_nsec / 1000000.0);
+        
         // Open the shared synchronization semaphore
         SET_SHM_STRING(str, SHM_SEM_ID, "");
         CHK(open_sem(str, 1, &g_status.sem));
@@ -544,26 +586,84 @@ static int configure_pf_handler() __CHK_FN__
         // Acquire the shared synchronization semaphore
         CHK(sem_wait(g_status.sem));
         
-        // Open the shared memory segment for the rank IDs
-        SET_SHM_STRING(str, SHM_PID_ID, "");
-        CHK(open_shm(str, sizeof(int32_t), TRUE, (void **)&g_status.ranks));
-        
         // Open the shared memory segment for the number of ranks
         SET_SHM_STRING(str, SHM_RNK_ID, "");
-        CHK(open_shm(str, sizeof(uint32_t), FALSE,
-                     (void **)&g_status.num_ranks));
+        CHK(open_shm(str, sizeof(uint32_t), FALSE, (void **)&g_status.num_ranks,
+                     NULL));
         
-        // Update the rank index, the number of ranks and store the PID
-        g_status.r_index                 = NUM_RANKS;
-        g_status.num_ranks_curr          = ++NUM_RANKS;
+        // Open the shared memory segment for the rank IDs
+        SET_SHM_STRING(str, SHM_PID_ID, "");
+        CHK(open_shm(str, sizeof(int32_t), FALSE, (void **)&g_status.ranks,
+                     &g_status.ranks_count));
+        
+        // Check for an empty position in the array to avoid resizing it
+        for (size_t r_index = 0; r_index < g_status.ranks_count; r_index++)
+        {
+            int32_t *r_pid = &g_status.ranks[r_index];
+            double  diff   = start_time;
+            
+            // If the rank is set, ensure that it belongs to the current run
+            if (*r_pid > 0 && kill(*r_pid, 0) == 0)
+            {
+                int64_t *diff_tmp = (int64_t *)&diff; // Trick to remove sign
+                
+                sprintf(str, "/proc/%d", *r_pid);
+                CHKB((stat(str, &statbuf) < 0 && errno != ENOENT), errno);
+                
+                diff      -= (ts->tv_sec * 1000.0) + (ts->tv_nsec / 1000000.0);
+                *diff_tmp &= (SIZE_MAX >> 1);
+            }
+            
+            // Increase the number of ranks if the process is active
+            // Important: If the PID matches that of the process manager (e.g.,
+            //            Hydra), the number of ranks can be incorrect! This
+            //            issue will only affect performance in out-of-core.
+            if (diff < START_DIFF)
+            {
+                num_ranks++;
+            }
+            // If we reach this point, the index can be reused
+            else if (g_status.r_index == UINT_MAX)
+            {
+                g_status.r_index = r_index;
+            }
+            // Finally, if the index is not going to be reused and it was set,
+            // clean the old memory segment (i.e., the process is inactive)
+            else if (*r_pid > 0)
+            {
+                SET_SHM_STRING(str, SHM_MEM_ID, "_%d", *r_pid);
+                CHKB((shm_unlink(str) && errno != ENOENT), errno);
+                
+                *r_pid = INT_MAX;
+            }
+        }
+        
+        // Resize the memory segment for the rank IDs, if needed
+        if (g_status.r_index == UINT_MAX)
+        {
+            MUNMAP(g_status.ranks, g_status.ranks_count * sizeof(int32_t));
+            SET_SHM_STRING(str, SHM_PID_ID, "");
+            CHK(open_shm(str, sizeof(int32_t), TRUE, (void **)&g_status.ranks,
+                         &g_status.ranks_count));
+            
+            g_status.r_index = (g_status.ranks_count - 1);
+        }
+        
+        // Update the rank ID and the number of ranks identified for now
         g_status.ranks[g_status.r_index] = getpid();
+        NUM_RANKS = num_ranks;
         
         // Release the shared synchronization semaphore
         CHK(sem_post(g_status.sem));
         
         // Open the shared memory segment to store the memory consumption
         SET_SHM_STRING(str, SHM_MEM_ID, "_%d", getpid());
-        CHK(open_shm(str, sizeof(uint64_t), FALSE, (void **)&g_status.memsize));
+        CHK(open_shm(str, sizeof(size_t), FALSE, (void **)&g_status.memsize,
+                     NULL));
+        MEM_SIZE = 0; // Ensure it is 0, if reusing the PID
+        
+        DBGPRINT("Shared memory configured (num_ranks=%d ranks_count=%zu)",
+                                               num_ranks, g_status.ranks_count);
     }
     
     // Set-up and launch the I/O thread
@@ -590,55 +690,18 @@ static int configure_pf_handler() __CHK_FN__
         sigaddset(&g_sigevict_mask, SIGEVICT);
     }
     
-    // Reset the I/O stats
-    {
-        g_status.num_reads  = 0;
-        g_status.num_writes = 0;
-    }
-    
     return CHK_SUCCESS({
                            // If an error is encountered, release everything
                            release_pf_handler();
                        });
 }
 
-static int configure_mem_shm() __CHK_FN__
-{
-    const uint32_t num_ranks     = NUM_RANKS; // Store it to avoid issues
-    const off_t    m_init        = (g_status.memsizes) ? NUM_RANKS_C : 0;
-    const size_t   size          = sizeof(uint64_t *) * num_ranks;
-    char           str[NAME_MAX] = { 0 };
-    
-    g_status.memsizes = (uint64_t **)realloc(g_status.memsizes, size);
-    
-    // Remap the shared memory structure that contains the PIDs, if needed
-    if (NUM_RANKS_C != num_ranks)
-    {
-        MUNMAP(g_status.ranks, NUM_RANKS_C * sizeof(int32_t));
-        SET_SHM_STRING(str, SHM_PID_ID, "");
-        CHK(open_shm(str, 0, FALSE, (void **)&g_status.ranks));
-        
-        // Update the number of ranks accordingly
-        NUM_RANKS_C = num_ranks;
-    }
-    
-    // Map the memory consumption of the other processes (intra-node)
-    for (uint32_t m_index = m_init; m_index < num_ranks; m_index++)
-    {
-        SET_SHM_STRING(str, SHM_MEM_ID, "_%d", g_status.ranks[m_index]);
-        CHK(open_shm(str, 0, FALSE, (void **)&g_status.memsizes[m_index]));
-    }
-    
-    return CHK_SUCCESS(CHK_EMPTY_ERROR_FN);
-}
-
 static int release_pf_handler() __CHK_FN__
 {
-    saction_t sa            = { .sa_handler = SIG_DFL };
-    char      str[NAME_MAX] = { 0 };
+    saction_t sa = { .sa_handler = SIG_DFL };
     
-    // Wait for the I/O thread to finish and release it
-    if (g_iothread.is_active) // Note: This is needed for error handling only!
+    // Wait for the I/O thread to finish and release it, if needed
+    if (g_iothread.is_active)
     {
         g_iothread.is_active = FALSE;
         CHK(sem_post(&g_iothread.sem));
@@ -652,57 +715,30 @@ static int release_pf_handler() __CHK_FN__
         CHK(sigaction(SIGEVICT, &sa, NULL));
     }
     
-    // Clean all the existing shared memory segments
+    // Release all the existing shared memory segments
     {
-        MUNMAP(g_status.memsize, sizeof(uint64_t));
-        SET_SHM_STRING(str, SHM_MEM_ID, "_%d", getpid());
-        CHKB((shm_unlink(str) && errno != ENOENT), errno);
-        
         if (g_status.memsizes != NULL)
         {
-            for (uint32_t m_index = 0; m_index < NUM_RANKS_C; m_index++)
+            const size_t num_ranks = g_status.memsizes_count;
+            
+            // Set the count back to zero
+            g_status.memsizes_count = 0;
+            
+            for (uint32_t r_index = 0; r_index < num_ranks; r_index++)
             {
-                MUNMAP(g_status.memsizes[m_index], sizeof(uint64_t));
+                MUNMAP(g_status.memsizes[r_index], sizeof(size_t));
             }
             
             FREE(g_status.memsizes);
         }
-        
-        // Mark the rank as non-valid to avoid conflicts with other processes
-        if (g_status.ranks != NULL)
-        {
-            // Acquire the shared synchronization semaphore
-            // CHK(sem_wait(g_status.sem));
-            
-            // NUM_RANKS--; << Avoiding to change the global number of ranks!
-            g_status.ranks[g_status.r_index] = INT_MAX;
-            
-            // Release the shared synchronization semaphore
-            // CHK(sem_post(g_status.sem));
-        }
 
-        MUNMAP(g_status.ranks, NUM_RANKS_C * sizeof(int32_t));
-        SET_SHM_STRING(str, SHM_PID_ID, "");
-        CHKB((shm_unlink(str) && errno != ENOENT), errno);
-        
+        MUNMAP(g_status.memsize, sizeof(size_t));
+        MUNMAP(g_status.ranks, g_status.ranks_count * sizeof(int32_t));
         MUNMAP(g_status.num_ranks, sizeof(uint32_t));
-        SET_SHM_STRING(str, SHM_RNK_ID, "");
-        CHKB((shm_unlink(str) && errno != ENOENT), errno);
-
         SEM_CLOSE(g_status.sem);
-        SET_SHM_STRING(str, SHM_SEM_ID, "");
-        CHKB((sem_unlink(str) && errno != ENOENT), errno);
     }
     
     return CHK_SUCCESS(CHK_EMPTY_ERROR_FN);
-}
-
-static void __attribute__ ((constructor)) ummap_startup()
-{
-    // Use the release function to clean-up existing shared files, if any
-    release_pf_handler();
-    
-    DBGPRINT("uMMAP-IO startup configuration executed correctly.");
 }
 
 
@@ -721,7 +757,13 @@ int ummap(size_t size, size_t seg_size, int prot, int fd, off_t offset,
     
     // Make sure that the segment size is correctly set
     CHKB(((size % seg_size) || (seg_size < sysconf(_SC_PAGESIZE)) ||
-          (seg_size & ~(seg_size - 1)) != seg_size ), EINVAL); // Power of 2
+          (seg_size & ~(seg_size - 1)) != seg_size), EINVAL); // Power of 2
+    
+    // Ensure that the page-fault mechanism is configured
+    if (!g_iothread.is_active)
+    {
+        CHK(configure_pf_handler());
+    }
     
     // Duplicate the file descriptor and ensure that it is properly configured
     fd = dup(fd);
@@ -756,23 +798,16 @@ int ummap(size_t size, size_t seg_size, int prot, int fd, off_t offset,
     // Create the evict policy based on the given type
     CHK(umpolicy_create((ummap_ptype_t)ptype, &ualloc->policy));
     
-    // Ensure that the page-fault mechanism is configured
-    if (!g_iothread.is_active)
-    {
-        CHK(configure_pf_handler());
-    }
-    
-    // Add the allocation to the cache
+    // Add the allocation to the cache and update the flush interval, if needed
     CHK(futex_lock(&g_ualloc_futex));
     CHK(addUAlloc(ualloc));
-    CHK(futex_unlock(&g_ualloc_futex));
     
-    // Update the flush interval and notify the I/O thread, if needed
     if (ualloc->flush_interval < g_iothread.min_flush_interval)
     {
         g_iothread.min_flush_interval = ualloc->flush_interval;
         CHK(sem_post(&g_iothread.sem));
     }
+    CHK(futex_unlock(&g_ualloc_futex));
     
     // Return the pointer
     *ptr = addr;
@@ -896,14 +931,23 @@ int umunmap(void *addr, int sync) __CHK_FN__
     ummap_alloc_t  *ualloc    = NULL;
     ummap_policy_t *policy    = NULL;
     ummap_seg_t    *alloc_seg = NULL;
+    uint32_t       *interval  = &g_iothread.min_flush_interval;
     
     // Retrieve the allocation and ensure that the addresses match
     CHK(getUAllocFromAddr((uintptr_t)addr, &ualloc));
     CHKB((addr != ualloc->addr), EINVAL);
     
-    // Remove the allocation from the cache
+    // Remove the allocation from the cache and update the flush interval
     CHK(futex_lock(&g_ualloc_futex));
     CHK(removeUAlloc(ualloc));
+    
+    *interval = UINT_MAX;
+    for (int index_a = 0; index_a < g_ualloc_cache.count; index_a++)
+    {
+        uint32_t flush_interval = g_ualloc_cache.data[index_a]->flush_interval;
+        
+        *interval = (flush_interval < *interval) ? flush_interval : *interval;
+    }
     CHK(futex_unlock(&g_ualloc_futex));
     
     // Remove the allocation from the recently-accessed list

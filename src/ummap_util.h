@@ -35,7 +35,8 @@ int get_env(const char *name, const char *format, void *target);
 /**
  * Opens a shared memory segment and allows to extend it, if requested.
  */
-int open_shm(const char *str, size_t size, int8_t incr, void **addr);
+int open_shm(const char *str, size_t size, int8_t incr, void **addr,
+             size_t *count);
 
 /**
  * Opens a shared named semaphore with an initial value.

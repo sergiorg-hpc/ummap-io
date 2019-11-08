@@ -115,13 +115,13 @@ typedef struct
     mconfig_t mconfig;             // Memory allocation configuration
     int32_t   bsync_enabled;       // Flag to enable bulk synchronization
     size_t    memlimit;            // Main memory limit for all the allocations
-    size_t    memlimit_rank;       // Main memory limit per rank (intra-node)
     uint32_t  r_index;             // Index of the rank (intra-node)
-    uint32_t  num_ranks_curr;      // Current-known number of ranks (intra-node)
-    int32_t   *ranks;              // Rank structure with the PIDs (intra-node)
     uint32_t  *num_ranks;          // Current number of ranks (intra-node)
-    uint64_t  *memsize;            // Process' memory consumption (intra-node)
-    uint64_t  **memsizes;          // Memory consumption structure (intra-node)
+    int32_t   *ranks;              // Rank structure with the PIDs (intra-node)
+    size_t    ranks_count;         // Size of rank structure, in num. elems.
+    size_t    *memsize;            // Process' memory consumption (intra-node)
+    size_t    **memsizes;          // Memory consumption structure (intra-node)
+    size_t    memsizes_count;      // Size of memsizes structure, in num. elems.
     sem_t     *sem;                // Synchronization semaphore
     uint32_t  num_reads;           // Number of I/O read operations
     uint32_t  num_writes;          // Number of I/O write operations

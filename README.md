@@ -9,6 +9,6 @@ Pending.
 ## Source Code Example
 Pending.
 
-## Known Bugs
-Pending.
+## Known Limitations
+No multi-threaded or shared compute node support.
 
