@@ -549,7 +549,7 @@ static int configure_pf_handler() __CHK_FN__
         
         str[0] = '\0'; // Reset the string
         CHK(get_env("UMMAP_BULK_SYNC", "%s", (void *)str));
-        g_status.bsync_enabled = !strcmp(str, "true");
+        g_status.bsync_enabled = (strcmp(str, "false") != 0);
         
         // Retrieve the main memory limit for all the allocations
         CHK(get_env("UMMAP_MEM_LIMIT", "%zu", (void *)&g_status.memlimit));
