@@ -50,7 +50,7 @@ int get_totalram(size_t *totalram) __CHK_FN__
 int get_usedram(size_t *_usedram) __CHK_FN__
 {
     static int        fd       = -1;
-    static size_t     baseram  = UINT64_MAX;
+    // static size_t     baseram  = UINT64_MAX;
     static size_t     totalram = 0;
     static size_t     usedram  = 0;
     static off_t      offset   = 0;
@@ -96,12 +96,12 @@ int get_usedram(size_t *_usedram) __CHK_FN__
         usedram = totalram - (usedram << 10);
         
         // Cache the base reference RSS (i.e., assuming used at the beginning)
-        if (baseram == UINT64_MAX || (usedram < baseram))
-        {
-            baseram = usedram;
-        }
+        // if (baseram == UINT64_MAX || (usedram < baseram))
+        // {
+        //     baseram = usedram;
+        // }
         
-        usedram -= baseram;
+        // usedram -= baseram;
         
         CHK(clock_gettime(CLOCK_REALTIME, &ts[0]));
     }

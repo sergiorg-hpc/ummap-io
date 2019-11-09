@@ -20,7 +20,7 @@ typedef struct stat      stat_t;
 #define MRMAP_FLAGS (MREMAP_FIXED | MREMAP_MAYMOVE)
 #define FILE_FLAGS  (O_NOATIME    | O_DSYNC) // O_DIRECT
 #define SIGEVICT    SIGRTMAX // Using SIGRTMAX to avoid conflicts
-#define START_DIFF  1000.0   // Difference limit between processes (1s)
+#define START_DIFF  250.0    // Difference limit between processes (250ms)
 #define SHM_SEM_ID  "ummap_sem"
 #define SHM_PID_ID  "ummap_pid"
 #define SHM_RNK_ID  "ummap_rnk"
@@ -283,7 +283,7 @@ static int evictSeg(ssize_t req_size) __CHK_FN__
             CHK(syncSeg(ualloc, alloc_seg, index_s, TRUE));
             CHK(fdatasync(ualloc->fd));
             
-            DBGPRINT("Removing local segment (index_s=%zu / req_size=%zu)\n",
+            DBGPRINT("Removing local segment (index_s=%zu / req_size=%zu)",
                                                              index_s, req_size);
             
             // Remove the segment permissions and request the OS to release it
@@ -395,7 +395,7 @@ static int ensureSegFit(size_t seg_size) __CHK_FN__
     // Evict a local segment if the current process exceeds its limit
     if (evict_seg)
     {
-        DBGPRINT("Evicting a local segment (ru=%zu / rlimit=%zu)\n",
+        DBGPRINT("Evicting a local segment (ru=%zu / rlimit=%zu)",
                                                        MEM_SIZE, memlimit_rank);
         
         CHK(evictSeg(seg_size));
@@ -620,21 +620,24 @@ static int configure_pf_handler() __CHK_FN__
             //            issue will only affect performance in out-of-core.
             if (diff < START_DIFF)
             {
-                num_ranks++;
+                num_ranks += (*r_pid != getpid()); // Needed for re-configure
             }
-            // If we reach this point, the index can be reused
-            else if (g_status.r_index == UINT_MAX)
+            else
             {
-                g_status.r_index = r_index;
-            }
-            // Finally, if the index is not going to be reused and it was set,
-            // clean the old memory segment (i.e., the process is inactive)
-            else if (*r_pid > 0)
-            {
-                SET_SHM_STRING(str, SHM_MEM_ID, "_%d", *r_pid);
-                CHKB((shm_unlink(str) && errno != ENOENT), errno);
+                // If we reach this point, the index can be reused
+                if (g_status.r_index == UINT_MAX)
+                {
+                    g_status.r_index = r_index;
+                }
                 
-                *r_pid = INT_MAX;
+                // Ensure that the old memory segment is removed
+                if (*r_pid > 0)
+                {
+                    SET_SHM_STRING(str, SHM_MEM_ID, "_%d", *r_pid);
+                    CHKB((shm_unlink(str) && errno != ENOENT), errno);
+                    
+                    *r_pid = 0;
+                }
             }
         }
         
@@ -660,7 +663,6 @@ static int configure_pf_handler() __CHK_FN__
         SET_SHM_STRING(str, SHM_MEM_ID, "_%d", getpid());
         CHK(open_shm(str, sizeof(size_t), FALSE, (void **)&g_status.memsize,
                      NULL));
-        MEM_SIZE = 0; // Ensure it is 0, if reusing the PID
         
         DBGPRINT("Shared memory configured (num_ranks=%d ranks_count=%zu)",
                                                num_ranks, g_status.ranks_count);
