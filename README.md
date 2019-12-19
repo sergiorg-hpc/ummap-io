@@ -58,6 +58,5 @@ The implementation of **uMMAP-IO** contains the following known bugs and limitat
 * **Multi-threading is not supported.** A solution is not available yet, but we plan to work on it.
 * **I/O drivers are not supported.** A solution is not available yet, but we plan to work on it.
 
-### Reporting issues
-
+## Disclaimer
 Even though the current `alpha` release of **uMMAP-IO** is relatively stable, we kindly ask you to report any issues that you might encounter on the [Issues](https://github.com/sergiorg-kth/ummap-io/issues) tab.
