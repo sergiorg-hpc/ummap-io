@@ -9,10 +9,11 @@ typedef struct stat     stat_t;
 #define SHM_FPERM   (S_IRUSR | S_IWUSR)
 #define TIME_LIMIT  50000000LL // 50ms
 
-uint32_t log2s(uint32_t n)
+uint32_t log2s(uint64_t n)
 {
-    uint32_t logn  = (n >= (1 << 16)) * 16;
-    uint32_t limit = 16 + logn;
+    uint64_t factor = 16 + (n > UINT32_MAX) * 16;
+    uint64_t logn   = (n >= (1 << factor)) * factor;
+    uint64_t limit  = factor + logn;
     
     while ((n >> logn) > 1)
     {
@@ -24,7 +25,7 @@ uint32_t log2s(uint32_t n)
         logn--;
     }
     
-    return logn;
+    return (uint32_t)logn;
 }
 
 int ts_set(timespec_t *ts, time_t tv_sec, long tv_nsec) __CHK_FN__

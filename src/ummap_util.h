@@ -10,7 +10,7 @@ typedef struct timespec timespec_t;
 /**
  * Calculates the integer part of the base 2 logarithm of a given number.
  */
-uint32_t log2s(uint32_t n);
+uint32_t log2s(uint64_t n);
 
 /**
  * Defines a given time specification according to the current RTC time.

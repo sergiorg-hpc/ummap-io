@@ -343,7 +343,7 @@ static int notifyMemlimit(size_t memlimit_rank) __CHK_FN__
         }
         
         // Map the memory consumption of the other processes (intra-node)
-        for (uint32_t r_index = r_init; r_index < num_ranks; r_index++)
+        for (off_t r_index = r_init; r_index < num_ranks; r_index++)
         {
             // Avoid to map twice the memory consumption of the process
             if (g_status.ranks[r_index] != r_pid)
@@ -358,7 +358,7 @@ static int notifyMemlimit(size_t memlimit_rank) __CHK_FN__
     }
     
     // Look for the PIDs with the highest memory consumption
-    for (uint32_t r_index = (g_status.r_index + 1) % num_ranks;
+    for (off_t r_index = (g_status.r_index + 1) % num_ranks;
          r_index != g_status.r_index; r_index = (r_index + 1) % num_ranks)
     {
         const size_t mem_size = *g_status.memsizes[r_index];
@@ -543,6 +543,7 @@ static int configure_pf_handler() __CHK_FN__
     char      str[NAME_MAX] = { 0 };
     
     // Retrieve the global settings from the ENV variables
+    if (g_status.memlimit == 0)
     {
         CHK(get_env("UMMAP_MEMCONFIG", "%s", (void *)str));
         g_status.mconfig = (mconfig_t)!strcmp(str, "dynamic");
@@ -568,17 +569,6 @@ static int configure_pf_handler() __CHK_FN__
     
     // Define the shared memory structures for out-of-core support
     {
-        uint32_t   num_ranks  = 1;
-        stat_t     statbuf    = { 0 };
-        timespec_t *ts        = &statbuf.st_mtim;
-        double     start_time = 0.0;
-        
-        // Retrieve the start time for the current process (in milliseconds)
-        sprintf(str, "/proc/%d", getpid());
-        CHKB((stat(str, &statbuf) < 0 && errno != ENOENT), errno);
-        
-        start_time = (ts->tv_sec * 1000.0) + (ts->tv_nsec / 1000000.0);
-        
         // Open the shared synchronization semaphore
         SET_SHM_STRING(str, SHM_SEM_ID, "");
         CHK(open_sem(str, 1, &g_status.sem));
@@ -596,76 +586,90 @@ static int configure_pf_handler() __CHK_FN__
         CHK(open_shm(str, sizeof(int32_t), FALSE, (void **)&g_status.ranks,
                      &g_status.ranks_count));
         
-        // Check for an empty position in the array to avoid resizing it
-        for (size_t r_index = 0; r_index < g_status.ranks_count; r_index++)
-        {
-            int32_t *r_pid = &g_status.ranks[r_index];
-            double  diff   = start_time;
-            
-            // If the rank is set, ensure that it belongs to the current run
-            if (*r_pid > 0 && kill(*r_pid, 0) == 0)
-            {
-                int64_t *diff_tmp = (int64_t *)&diff; // Trick to remove sign
-                
-                sprintf(str, "/proc/%d", *r_pid);
-                CHKB((stat(str, &statbuf) < 0 && errno != ENOENT), errno);
-                
-                diff      -= (ts->tv_sec * 1000.0) + (ts->tv_nsec / 1000000.0);
-                *diff_tmp &= (SIZE_MAX >> 1);
-            }
-            
-            // Increase the number of ranks if the process is active
-            // Important: If the PID matches that of the process manager (e.g.,
-            //            Hydra), the number of ranks can be incorrect! This
-            //            issue will only affect performance in out-of-core.
-            if (diff < START_DIFF)
-            {
-                num_ranks += (*r_pid != getpid()); // Needed for re-configure
-            }
-            else
-            {
-                // If we reach this point, the index can be reused
-                if (g_status.r_index == UINT_MAX)
-                {
-                    g_status.r_index = r_index;
-                }
-                
-                // Ensure that the old memory segment is removed
-                if (*r_pid > 0)
-                {
-                    SET_SHM_STRING(str, SHM_MEM_ID, "_%d", *r_pid);
-                    CHKB((shm_unlink(str) && errno != ENOENT), errno);
-                    
-                    *r_pid = 0;
-                }
-            }
-        }
-        
-        // Resize the memory segment for the rank IDs, if needed
         if (g_status.r_index == UINT_MAX)
         {
-            MUNMAP(g_status.ranks, g_status.ranks_count * sizeof(int32_t));
-            SET_SHM_STRING(str, SHM_PID_ID, "");
-            CHK(open_shm(str, sizeof(int32_t), TRUE, (void **)&g_status.ranks,
-                         &g_status.ranks_count));
+            uint32_t   num_ranks  = 1;
+            stat_t     statbuf    = { 0 };
+            timespec_t *ts        = &statbuf.st_mtim;
+            double     start_time = 0.0;
             
-            g_status.r_index = (g_status.ranks_count - 1);
+            // Retrieve the start time for the current process (in milliseconds)
+            sprintf(str, "/proc/%d", getpid());
+            CHKB((stat(str, &statbuf) < 0 && errno != ENOENT), errno);
+            
+            start_time = (ts->tv_sec * 1000.0) + (ts->tv_nsec / 1000000.0);
+            
+            // Check for an empty position in the array to avoid resizing it
+            for (off_t r_index = 0; r_index < g_status.ranks_count; r_index++)
+            {
+                int32_t *r_pid = &g_status.ranks[r_index];
+                double  diff   = start_time;
+                
+                // If the rank is set and alive, ensure it belongs to the group
+                if (*r_pid > 0 && kill(*r_pid, 0) == 0 && *r_pid != getpid())
+                {
+                    int64_t *diff_tmp = (int64_t *)&diff; // Sign removal trick
+                    
+                    sprintf(str, "/proc/%d", *r_pid);
+                    CHKB((stat(str, &statbuf) < 0 && errno != ENOENT), errno);
+                    
+                    diff -= (ts->tv_sec * 1000.0) + (ts->tv_nsec / 1000000.0);
+                    *diff_tmp &= INT64_MAX;
+                }
+                
+                // Increase the number of ranks if the process is active
+                // Important: If the PID matches that of the proc. mngr. (e.g.,
+                //            Hydra), the number of ranks can be incorrect! This
+                //            issue will only affect performance in out-of-core.
+                if (diff < START_DIFF)
+                {
+                    num_ranks++;
+                }
+                else
+                {
+                    // If we reach this point, the index can be reused
+                    if (g_status.r_index == UINT_MAX)
+                    {
+                        g_status.r_index = r_index;
+                    }
+                    
+                    // Ensure that the old memory segment is removed
+                    if (*r_pid > 0)
+                    {
+                        SET_SHM_STRING(str, SHM_MEM_ID, "_%d", *r_pid);
+                        CHKB((shm_unlink(str) && errno != ENOENT), errno);
+                        
+                        *r_pid = 0;
+                    }
+                }
+            }
+            
+            // Resize the memory segment for the rank IDs, if needed
+            if (g_status.r_index == UINT_MAX)
+            {
+                MUNMAP(g_status.ranks, g_status.ranks_count * sizeof(int32_t));
+                SET_SHM_STRING(str, SHM_PID_ID, "");
+                CHK(open_shm(str, sizeof(int32_t), TRUE,
+                             (void **)&g_status.ranks, &g_status.ranks_count));
+                
+                g_status.r_index = (g_status.ranks_count - 1);
+            }
+            
+            // Update the rank ID and the number of ranks identified for now
+            g_status.ranks[g_status.r_index] = getpid();
+            NUM_RANKS = num_ranks;
         }
-        
-        // Update the rank ID and the number of ranks identified for now
-        g_status.ranks[g_status.r_index] = getpid();
-        NUM_RANKS = num_ranks;
-        
-        // Release the shared synchronization semaphore
-        CHK(sem_post(g_status.sem));
         
         // Open the shared memory segment to store the memory consumption
         SET_SHM_STRING(str, SHM_MEM_ID, "_%d", getpid());
         CHK(open_shm(str, sizeof(size_t), FALSE, (void **)&g_status.memsize,
                      NULL));
         
+        // Release the shared synchronization semaphore
+        CHK(sem_post(g_status.sem));
+        
         DBGPRINT("Shared memory configured (num_ranks=%d ranks_count=%zu)",
-                                               num_ranks, g_status.ranks_count);
+                                               NUM_RANKS, g_status.ranks_count);
     }
     
     // Set-up and launch the I/O thread
@@ -726,7 +730,7 @@ static int release_pf_handler() __CHK_FN__
             // Set the count back to zero
             g_status.memsizes_count = 0;
             
-            for (uint32_t r_index = 0; r_index < num_ranks; r_index++)
+            for (off_t r_index = 0; r_index < num_ranks; r_index++)
             {
                 MUNMAP(g_status.memsizes[r_index], sizeof(size_t));
             }
@@ -761,7 +765,7 @@ int ummap(size_t size, size_t seg_size, int prot, int fd, off_t offset,
     CHKB(((size % seg_size) || (seg_size < sysconf(_SC_PAGESIZE)) ||
           (seg_size & ~(seg_size - 1)) != seg_size), EINVAL); // Power of 2
     
-    // Ensure that the page-fault mechanism is configured
+    // Configure the page-fault mechanism, if needed
     if (!g_iothread.is_active)
     {
         CHK(configure_pf_handler());
@@ -817,7 +821,11 @@ int ummap(size_t size, size_t seg_size, int prot, int fd, off_t offset,
     return CHK_SUCCESS({
                            // If an error is encountered, release everything
                            MUNMAP(addr, size);
-                           if (ualloc) FREE(ualloc->alloc_seg);
+                           if (ualloc != NULL)
+                           {
+                               FREE(ualloc->policy);
+                               FREE(ualloc->alloc_seg);
+                           }
                            FREE(ualloc);
                        });
 }

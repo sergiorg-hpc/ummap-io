@@ -44,7 +44,7 @@ That is all!
 
 ## Simplified API
 
-A malloc-like interface is also available to use on the following repository:
+A `malloc`-like interface is also available to use on the following repository:
 
 https://github.com/sergiorg-kth/umalloc
 
@@ -55,9 +55,10 @@ This wrapper utilizes **uMMAP-IO** with certain default settings, while hiding t
 The implementation of **uMMAP-IO** contains the following known bugs and limitations:
 * **Unable to map, unmap, and map again.** See [Issue #1](https://github.com/sergiorg-kth/ummap-io/issues/1) for a fix.
 * **Integration as part of another library is not supported.** See [Issue #1](https://github.com/sergiorg-kth/ummap-io/issues/1) for a fix.
-* **Multi-threading is not supported.** A solution is not available yet, but we plan to work on it.
-* **I/O drivers are not supported.** A solution is not available yet, but we plan to work on it.
-* **Shared compute node not supported.** A solution is not available yet, but we plan to work on it.
+* **Multi-threading is not supported.**
+* **I/O drivers are not supported.**
+* **Shared compute nodes are not supported.**
+* **Shared files with overlapping areas not supported.**
 
 ## Disclaimer
 Even though the current `alpha` release of **uMMAP-IO** is relatively stable, we kindly ask you to report any issues that you might encounter on the [Issues](https://github.com/sergiorg-kth/ummap-io/issues) tab.
