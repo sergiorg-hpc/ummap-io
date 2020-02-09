@@ -823,7 +823,7 @@ int ummap(size_t size, size_t seg_size, int prot, int fd, off_t offset,
                            MUNMAP(addr, size);
                            if (ualloc != NULL)
                            {
-                               FREE(ualloc->policy);
+                               umpolicy_release(ualloc->policy);
                                FREE(ualloc->alloc_seg);
                            }
                            FREE(ualloc);
