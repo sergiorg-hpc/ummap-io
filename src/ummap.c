@@ -759,7 +759,7 @@ int ummap(size_t size, size_t seg_size, int prot, int fd, off_t offset,
     char          *addr   = NULL;
     
     // Make sure that the segment size is correctly set
-    CHKB(((size % seg_size) || (seg_size < sysconf(_SC_PAGESIZE)) ||
+    CHKB((!seg_size || (size % seg_size) || seg_size < sysconf(_SC_PAGESIZE) ||
           (seg_size & ~(seg_size - 1)) != seg_size), EINVAL); // Power of 2
     
     // Configure the page-fault mechanism, if needed
