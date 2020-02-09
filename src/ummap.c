@@ -267,7 +267,7 @@ static int syncUAllocBulk(ummap_alloc_t *ualloc) __CHK_FN__
 static int evictSeg(ssize_t req_size) __CHK_FN__
 {
     for (ummap_alloc_t *ualloc = g_ualloc_list.back;
-         req_size > 0 && ualloc != NULL;)
+         req_size > 0 && ualloc != NULL; ualloc = g_ualloc_list.back)
     {
         ummap_policy_t *policy    = ualloc->policy;
         ummap_seg_t    *alloc_seg = NULL;
@@ -297,9 +297,6 @@ static int evictSeg(ssize_t req_size) __CHK_FN__
             req_size -= ualloc->seg_size;
             MEM_SIZE -= ualloc->seg_size;
         }
-        
-        // Advance the pointer for the next iteration
-        ualloc = ualloc->prev;
         
         // Remove the current allocation from the pLRU, if needed
         if (is_empty_seg(&policy->list))
@@ -821,12 +818,12 @@ int ummap(size_t size, size_t seg_size, int prot, int fd, off_t offset,
     return CHK_SUCCESS({
                            // If an error is encountered, release everything
                            MUNMAP(addr, size);
-                           if (ualloc != NULL)
+                           SAFE_RELEASE(ualloc,
                            {
                                umpolicy_release(ualloc->policy);
                                FREE(ualloc->alloc_seg);
-                           }
-                           FREE(ualloc);
+                               FREE(ualloc);
+                           });
                        });
 }
 
