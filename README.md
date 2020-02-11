@@ -52,11 +52,9 @@ This wrapper utilizes **uMMAP-IO** with certain default settings, while hiding t
 
 
 ## Known Bugs / Limitations
-The implementation of **uMMAP-IO** contains the following known bugs and limitations:
-* **Unable to map, unmap, and map again.** See [Issue #1](https://github.com/sergiorg-kth/ummap-io/issues/1) for a fix.
-* **Integration as part of another library is not supported.** See [Issue #1](https://github.com/sergiorg-kth/ummap-io/issues/1) for a fix.
+The implementation of **uMMAP-IO** contains the following known bugs and/or limitations:
 * **Multi-threading is not supported.** Using the library with multiple threads can produce unexpected issues, even when accessing non-overlapping areas of a mapping.
-* **I/O drivers are not supported.** An I/O driver abstraction can provide benefits on certain file systems (e.g., MPI-IO collective operations for large process counts).
+* **I/O drivers are not supported.** An I/O driver abstraction could provide benefits on certain file systems (e.g., MPI-IO collective operations for large process counts). See reference paper of HiPC'19.
 * **Shared compute nodes are not supported.** Two different users running applications on a shared node can produce unexpected issues (i.e., **uMMAP-IO** calculates memory consumption assuming a single user).
 * **Shared files with overlapping areas not supported.** Consistency is not guaranteed when multiple processes `read` / `write` overlapping areas of a shared file.
 
