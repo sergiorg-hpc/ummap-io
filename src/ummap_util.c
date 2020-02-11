@@ -9,10 +9,11 @@ typedef struct stat     stat_t;
 #define SHM_FPERM   (S_IRUSR | S_IWUSR)
 #define TIME_LIMIT  50000000LL // 50ms
 
-uint32_t log2s(uint32_t n)
+uint32_t log2s(uint64_t n)
 {
-    uint32_t logn  = (n >= (1 << 16)) * 16;
-    uint32_t limit = 16 + logn;
+    uint64_t factor = 16 + (n > UINT32_MAX) * 16;
+    uint64_t logn   = (n >= (1 << factor)) * factor;
+    uint64_t limit  = factor + logn;
     
     while ((n >> logn) > 1)
     {
@@ -24,7 +25,7 @@ uint32_t log2s(uint32_t n)
         logn--;
     }
     
-    return logn;
+    return (uint32_t)logn;
 }
 
 int ts_set(timespec_t *ts, time_t tv_sec, long tv_nsec) __CHK_FN__
@@ -50,7 +51,7 @@ int get_totalram(size_t *totalram) __CHK_FN__
 int get_usedram(size_t *_usedram) __CHK_FN__
 {
     static int        fd       = -1;
-    static size_t     baseram  = UINT64_MAX;
+    // static size_t     baseram  = UINT64_MAX;
     static size_t     totalram = 0;
     static size_t     usedram  = 0;
     static off_t      offset   = 0;
@@ -96,12 +97,12 @@ int get_usedram(size_t *_usedram) __CHK_FN__
         usedram = totalram - (usedram << 10);
         
         // Cache the base reference RSS (i.e., assuming used at the beginning)
-        if (baseram == UINT64_MAX || (usedram < baseram))
-        {
-            baseram = usedram;
-        }
+        // if (baseram == UINT64_MAX || (usedram < baseram))
+        // {
+        //     baseram = usedram;
+        // }
         
-        usedram -= baseram;
+        // usedram -= baseram;
         
         CHK(clock_gettime(CLOCK_REALTIME, &ts[0]));
     }
@@ -120,7 +121,8 @@ int get_env(const char *name, const char *format, void *target) __CHK_FN__
     return CHK_SUCCESS(CHK_EMPTY_ERROR_FN);
 }
 
-int open_shm(const char *name, size_t size, int8_t incr, void **addr) __CHK_FN__
+int open_shm(const char *name, size_t size, int8_t incr, void **addr,
+             size_t *count) __CHK_FN__
 {
     int32_t fd = -1;
     stat_t  st = { 0 };
@@ -137,6 +139,11 @@ int open_shm(const char *name, size_t size, int8_t incr, void **addr) __CHK_FN__
     *addr = mmap(NULL, st.st_size, (PROT_READ | PROT_WRITE), MAP_SHARED, fd, 0);
     CHKB((*addr == MAP_FAILED), ENOMEM);
     CHK(close(fd));
+    
+    if (size > 0 && count != NULL)
+    {
+        *count = st.st_size / size;
+    }
     
     return CHK_SUCCESS(CHK_EMPTY_ERROR_FN);
 }

@@ -135,7 +135,10 @@ int umpolicy_create(ummap_ptype_t ptype, ummap_policy_t **policy) __CHK_FN__
 void umpolicy_release(ummap_policy_t *policy)
 {
     // Remove all the dependencies from the segments and release the policy
-    clear_seg_list(&policy->list);
-    free(policy);
+    if (policy != NULL)
+    {
+        clear_seg_list(&policy->list);
+        free(policy);
+    }
 }
 
